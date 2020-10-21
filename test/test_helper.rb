@@ -1,57 +1,25 @@
 require "bundler/setup"
 require "carrierwave"
 require "combustion"
-require "active_storage/engine"
 Bundler.require(:default)
 require "minitest/autorun"
 require "minitest/pride"
-require "attr_encrypted"
 
-CarrierWave.configure do |config|
-  config.storage = :file
-  config.store_dir = "/tmp/store"
-  config.cache_dir = "/tmp/cache"
+$logger = ActiveSupport::Logger.new(ENV["VERBOSE"] ? STDOUT : nil)
+
+def mongoid?
+  defined?(Mongoid)
 end
 
-class TextUploader < CarrierWave::Uploader::Base
-  encrypt key: SecureRandom.random_bytes(32)
+require_relative "support/carrierwave"
+require_relative "support/shrine"
 
-  process append: "!!"
-
-  version :thumb do
-    process append: ".."
-  end
-
-  def append(str)
-    File.write(current_path, File.read(current_path) + str)
-  end
+if mongoid?
+  require_relative "support/mongoid"
+else
+  require_relative "support/combustion"
+  require "carrierwave/orm/activerecord"
+  require_relative "support/active_record"
 end
 
-class AvatarUploader < CarrierWave::Uploader::Base
-  encrypt key: SecureRandom.random_bytes(32)
-end
-
-class DocumentUploader < CarrierWave::Uploader::Base
-  encrypt key: SecureRandom.random_bytes(32)
-end
-
-class ImageUploader < CarrierWave::Uploader::Base
-end
-
-Combustion.path = "test/internal"
-Combustion.initialize! :active_record, :active_job do
-  if config.active_record.sqlite3.respond_to?(:represent_boolean_as_integer)
-    config.active_record.sqlite3.represent_boolean_as_integer = true
-  end
-  config.active_storage.service = :test
-  config.active_job.queue_adapter = :inline
-end
-
-if ENV["VERBOSE"]
-  logger = ActiveSupport::Logger.new(STDOUT)
-  ActiveRecord::Base.logger = logger
-  ActiveStorage.logger = logger
-  ActiveJob::Base.logger = logger
-end
-
-require "carrierwave/orm/activerecord"
+Lockbox.master_key = SecureRandom.random_bytes(32)

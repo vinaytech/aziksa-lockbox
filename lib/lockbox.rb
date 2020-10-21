@@ -1,6 +1,17 @@
+# stdlib
+require "base64"
+require "openssl"
+require "securerandom"
+
 # modules
 require "lockbox/box"
+require "lockbox/calculations"
 require "lockbox/encryptor"
+require "lockbox/key_generator"
+require "lockbox/io"
+require "lockbox/migrator"
+require "lockbox/model"
+require "lockbox/padding"
 require "lockbox/utils"
 require "lockbox/version"
 
@@ -8,52 +19,52 @@ require "lockbox/version"
 require "lockbox/carrier_wave_extensions" if defined?(CarrierWave)
 require "lockbox/railtie" if defined?(Rails)
 
-class Lockbox
+if defined?(ActiveSupport::LogSubscriber)
+  require "lockbox/log_subscriber"
+  Lockbox::LogSubscriber.attach_to :lockbox
+end
+
+if defined?(ActiveSupport.on_load)
+  ActiveSupport.on_load(:active_record) do
+    extend Lockbox::Model
+    extend Lockbox::Model::Attached
+    ActiveRecord::Calculations.prepend Lockbox::Calculations
+  end
+
+  ActiveSupport.on_load(:mongoid) do
+    Mongoid::Document::ClassMethods.include(Lockbox::Model)
+  end
+end
+
+module Lockbox
   class Error < StandardError; end
   class DecryptionError < Error; end
+  class PaddingError < Error; end
+
+  autoload :Audit, "lockbox/audit"
+
+  extend Padding
 
   class << self
     attr_accessor :default_options
+    attr_writer :master_key
   end
-  self.default_options = {algorithm: "aes-gcm"}
+  self.default_options = {}
 
-  def initialize(**options)
-    options = self.class.default_options.merge(options)
-    previous_versions = options.delete(:previous_versions)
-
-    @boxes =
-      [Box.new(options)] +
-      Array(previous_versions).map { |v| Box.new(v) }
+  def self.master_key
+    @master_key ||= ENV["LOCKBOX_MASTER_KEY"]
   end
 
-  def encrypt(message, **options)
-    message = check_string(message, "message")
-    @boxes.first.encrypt(message, **options)
+  def self.migrate(relation, batch_size: 1000, restart: false)
+    Migrator.new(relation, batch_size: batch_size).migrate(restart: restart)
   end
 
-  def decrypt(ciphertext, **options)
-    ciphertext = check_string(ciphertext, "ciphertext")
+  def self.rotate(relation, batch_size: 1000, attributes:)
+    Migrator.new(relation, batch_size: batch_size).rotate(attributes: attributes)
+  end
 
-    # ensure binary
-    if ciphertext.encoding != Encoding::BINARY
-      # dup to prevent mutation
-      ciphertext = ciphertext.dup.force_encoding(Encoding::BINARY)
-    end
-
-    @boxes.each_with_index do |box, i|
-      begin
-        return box.decrypt(ciphertext, **options)
-      rescue => e
-        error_classes = [DecryptionError]
-        error_classes << RbNaCl::LengthError if defined?(RbNaCl::LengthError)
-        error_classes << RbNaCl::CryptoError if defined?(RbNaCl::CryptoError)
-        if error_classes.any? { |ec| e.is_a?(ec) }
-          raise DecryptionError, "Decryption failed" if i == @boxes.size - 1
-        else
-          raise e
-        end
-      end
-    end
+  def self.generate_key
+    SecureRandom.hex(32)
   end
 
   def self.generate_key_pair
@@ -65,16 +76,31 @@ class Lockbox
     # alice is sending message to bob
     # use bob first in both cases to prevent keys being swappable
     {
-      encryption_key: (bob.public_key.to_bytes + alice.to_bytes).unpack("H*").first,
-      decryption_key: (bob.to_bytes + alice.public_key.to_bytes).unpack("H*").first
+      encryption_key: to_hex(bob.public_key.to_bytes + alice.to_bytes),
+      decryption_key: to_hex(bob.to_bytes + alice.public_key.to_bytes)
     }
   end
 
-  private
+  def self.attribute_key(table:, attribute:, master_key: nil, encode: true)
+    master_key ||= Lockbox.master_key
+    raise ArgumentError, "Missing master key" unless master_key
 
-  def check_string(str, name)
-    str = str.read if str.respond_to?(:read)
-    raise TypeError, "can't convert #{name} to string" unless str.respond_to?(:to_str)
-    str.to_str
+    key = Lockbox::KeyGenerator.new(master_key).attribute_key(table: table, attribute: attribute)
+    key = to_hex(key) if encode
+    key
+  end
+
+  def self.to_hex(str)
+    str.unpack("H*").first
+  end
+
+  def self.new(**options)
+    Encryptor.new(**options)
+  end
+
+  def self.encrypts_action_text_body(**options)
+    ActiveSupport.on_load(:action_text_rich_text) do
+      ActionText::RichText.encrypts :body, **options
+    end
   end
 end

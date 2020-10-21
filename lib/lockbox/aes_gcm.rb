@@ -1,6 +1,4 @@
-require "openssl"
-
-class Lockbox
+module Lockbox
   class AES_GCM
     def initialize(key)
       raise ArgumentError, "Key must be 32 bytes" unless key && key.bytesize == 32
@@ -20,9 +18,10 @@ class Lockbox
       # In encryption mode, it must be set after calling #encrypt and setting #key= and #iv=
       cipher.auth_data = associated_data || ""
 
-      ciphertext = cipher.update(message) + cipher.final
+      ciphertext = String.new
+      ciphertext << cipher.update(message) unless message.empty?
+      ciphertext << cipher.final
       ciphertext << cipher.auth_tag
-
       ciphertext
     end
 
@@ -31,7 +30,6 @@ class Lockbox
 
       fail_decryption if nonce.to_s.bytesize != nonce_bytes
       fail_decryption if auth_tag.to_s.bytesize != auth_tag_bytes
-      fail_decryption if ciphertext.to_s.bytesize == 0
 
       cipher = OpenSSL::Cipher.new("aes-256-gcm")
       # do not change order of operations
@@ -45,7 +43,11 @@ class Lockbox
       cipher.auth_data = associated_data || ""
 
       begin
-        cipher.update(ciphertext) + cipher.final
+        if ciphertext.to_s.empty?
+          cipher.final
+        else
+          cipher.update(ciphertext) + cipher.final
+        end
       rescue OpenSSL::Cipher::CipherError
         fail_decryption
       end
